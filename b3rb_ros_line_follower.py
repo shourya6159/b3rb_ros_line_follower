@@ -242,6 +242,7 @@ class LineFollower(Node):
 
         else:
             #front obstacle detection
+            mid = num_readings // 2
             front_right_sector = list(message.ranges[mid - 80 : mid])
             front_left_sector = list(message.ranges[mid : mid + 80])
             
