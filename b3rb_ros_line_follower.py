@@ -337,8 +337,16 @@ class LineFollower(Node):
     def sign_board_callback(self, message):
         """Receives traffic sign board direction hints."""
         try:
-            sign_data = json.loads(message.data)
-            self.latest_sign_board_info.update(sign_data)
+            sign_data = dict(message.data)
+            update = True
+
+            for label in ["A","B","C","X","Y","Z"]:
+                if not label in sign_data:
+                    update = False
+                    break
+
+            if(update): self.latest_sign_board_info.update(sign_data)
+            
         except Exception:
             self.get_logger().info(f"Heard Sign Board: {message.data}")
 
