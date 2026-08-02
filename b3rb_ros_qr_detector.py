@@ -11,46 +11,75 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import time
- 
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 import cv2
 import numpy as np
- 
+
+# Known decoy/fake QR codes on the track - any of these should be treated as
+# if nothing was decoded at all, and never published.
+IGNORED_PAYLOADS = {
+    'FAKE_HOSPITAL_1',
+    'FAKE_HOSPITAL_2',
+    'FAKE_HOSPITAL_3',
+}
+
 try:
     from pyzbar import pyzbar
 except ImportError:
     pyzbar = None
 
+
 class QRDetector(Node):
     """
     ROS 2 Node that processes raw camera images to scan for QR codes.
-    It publishes the detected QR code payload on the `/qr_detection` topic.
+
+    Publishing behaviour (to avoid spamming /qr_detection and flapping):
+      - A payload is published the moment it's decoded, as soon as it
+        differs from the last published payload - even a single successful
+        scan (e.g. one good frame while approaching a code from an angle)
+        is enough to trigger a publish.
+      - If the code then goes missing for `loss_grace_period` seconds
+        *continuously* (any hit in between resets that timer), a single
+        "RESET" message is published and tracking state is cleared. This is
+        what prevents flapping: a code that flickers in and out faster than
+        the grace period never triggers a RESET in between.
+      - Repeated frames of the same code, or repeated no-detect frames
+        after RESET has already been sent, produce no publishes at all.
+      - Payloads in IGNORED_PAYLOADS (e.g. known decoy/fake codes) are
+        never published - they're treated exactly as if no code was seen
+        at all in that frame, and can still count toward a loss/RESET if
+        one was already being tracked.
     """
+
     def __init__(self):
         super().__init__('qr_detector')
 
-        self.loss_grace_period = 0.3
-        self.pyzbar_cooldown = 0.3
-        self.now = time.monotonic()
+        # --- Tunables ---
+        self.declare_parameter('loss_grace_period', 1.0)    # seconds of *continuous* misses before RESET
+        self.declare_parameter('dedup_window', 2.0)         # seconds after a RESET during which the same code reappearing is treated as a continuation, not a new event
+        self.loss_grace_period = self.get_parameter('loss_grace_period').value
+        self.dedup_window = self.get_parameter('dedup_window').value
 
+        # --- State ---
         self.last_published = None      # last payload string we actually published (None or "RESET")
-        self.last_seen_data = None      # last successfully decoded payload (regardless of publish)
-        self.last_seen_time = None      # time.monotonic() of the last successful detection
-        self.last_pyzbar_attempt = 0.0  # time.monotonic() of the last pyzbar fallback attempt
- 
-        # Subscription for camera images.
+        self.last_seen_time = None      # time.monotonic() of the most recent successful detection
+        self.first_miss_time = None     # time.monotonic() of the first miss since the last successful detection
+        self.reset_payload = None       # payload that was active when the last RESET was published
+        self.reset_time = None          # time.monotonic() of the last RESET publish
+
+        self.detector = cv2.QRCodeDetector()
+
         self.subscription_camera = self.create_subscription(
             CompressedImage,
             '/camera/image_raw/compressed',
             self.camera_image_callback,
             10)
 
-        # Publisher for QR code detection results.
         self.publisher_qr = self.create_publisher(
             String,
             '/qr_detection',
@@ -60,51 +89,52 @@ class QRDetector(Node):
 
     def camera_image_callback(self, message):
         """Processes incoming camera frames to detect QR codes."""
-        # Convert compressed image message to OpenCV format
         np_arr = np.frombuffer(message.data, np.uint8)
         image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-
         if image is None:
             return
 
-        self.now= time.monotonic()
+        now = time.monotonic()
         qr_data = self.detect_qr_code(image)
 
+        if qr_data:
+            self.last_seen_time = now
+            self.first_miss_time = None  # any hit clears an in-progress miss streak
 
-        if qr_data is not None:
-            # Publish the decoded QR payload
-
-            self.last_seen_data = qr_data
-            self.last_seen_time = self.now
-            self._maybe_publish(qr_data)
- 
-
-        #    msg = String()
-        #    msg.data = qr_data
-        #    self.publisher_qr.publish(msg)
-        #    self.get_logger().info(f"Published QR Data: {qr_data}")
+            if qr_data == self.reset_payload and self.reset_time is not None \
+                    and (now - self.reset_time) < self.dedup_window:
+                # Same code that was just reset reappeared quickly - treat this as
+                # a continuation of the same encounter, not a new event. Resume
+                # tracking silently so future genuine changes still publish normally.
+                self.last_published = qr_data
+                self.reset_payload = None
+                self.reset_time = None
+            elif qr_data != self.last_published:
+                self._publish(qr_data)
         else:
-            self._check_for_loss()
+            self._check_for_loss(now)
 
-    def _maybe_publish(self, qr_data):
-        """Publish only if this payload differs from the last one we published."""
-        if qr_data == self.last_published:
-            return
-        self._publish(qr_data)
-
-    def _check_for_loss(self):
-        """If a tracked code hasn't been seen for longer than the grace period,
-        publish a single RESET and clear tracking state."""
+    def _check_for_loss(self, now):
+        """If a code hasn't been seen for longer than the grace period *continuously*
+        since the first miss, publish a single RESET and clear tracking state.
+        A single missed frame does not immediately reset anything - it only starts
+        (or continues) a timer that any subsequent hit will cancel."""
         if self.last_seen_time is None:
             return  # nothing was ever tracked, nothing to reset
- 
-        if self.last_published == "RESET":
-            return  # already reset, don't spam
- 
-        if (self.now - self.last_seen_time) >= self.loss_grace_period:
+
+        if self.last_published in (None, "RESET"):
+            return  # already reset (or never published), nothing to lose
+
+        if self.first_miss_time is None:
+            self.first_miss_time = now
+            return
+
+        if (now - self.first_miss_time) >= self.loss_grace_period:
+            self.reset_payload = self.last_published
+            self.reset_time = now
             self._publish("RESET")
-            self.last_seen_data = None
             self.last_seen_time = None
+            self.first_miss_time = None
 
     def _publish(self, payload):
         msg = String()
@@ -115,34 +145,72 @@ class QRDetector(Node):
 
     def detect_qr_code(self, image):
         """
-        Detect and decode QR code in the image.
-        
-        OPTIMIZATION HINTS:
-        - OpenCV has a built-in QR Code detector: cv2.QRCodeDetector().
-        - Alternatively, you can use Pyzbar (a popular and robust library for barcode/QR code reading).
-        - Ensure to pre-process the image (e.g., convert to grayscale, thresholding, cropping to region 
-          of interest where the building/QR board is expected to appear) to improve speed and reliability.
+        Detect and decode a QR code in the image, escalating through
+        preprocessing stages only as needed (cheapest first):
+
+          Stage 1 - raw frame:        try as-is, works for the easy/common case.
+          Stage 2 - CLAHE + upscale:  evens out lighting/glare and gives more
+                                       pixels-per-module for small/far codes.
+          Stage 3 - adaptive thresh:  clean binarization for borderline
+                                       contrast/mild blur cases.
+
+        Each stage tries pyzbar first (primary, more reliable), then OpenCV
+        as a fallback within that stage.
         """
-        # --- Method 1: Using OpenCV Built-in QR Detector ---
+        # --- Stage 1: raw frame ---
+        data = self._try_decode(image)
+        if data:
+            return data
+
+        # --- Stage 2: CLAHE (adaptive histogram equalization) + 2x upscale ---
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        upscaled = cv2.resize(enhanced, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+
+        data = self._try_decode(upscaled)
+        if data:
+            return data
+
+        # --- Stage 3: adaptive threshold on top of the enhanced/upscaled image ---
+        binarized = cv2.adaptiveThreshold(
+            upscaled, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            blockSize=31,
+            C=5)
+
+        data = self._try_decode(binarized)
+        if data:
+            return data
+
+        return None
+
+    def _try_decode(self, image):
+        """Attempt pyzbar first (primary), then OpenCV (fallback), on a single
+        image variant. Works with both BGR and single-channel grayscale input -
+        both pyzbar and cv2.QRCodeDetector accept either. Payloads in
+        IGNORED_PAYLOADS (e.g. known decoy/fake codes) are treated as if
+        nothing was decoded at all."""
+        if pyzbar is not None:
+            try:
+                decoded_objects = pyzbar.decode(image)
+                if decoded_objects:
+                    data = decoded_objects[0].data.decode('utf-8')
+                    if data not in IGNORED_PAYLOADS:
+                        return data
+            except Exception as e:
+                self.get_logger().debug(f"pyzbar QR Detection failed: {e}")
+
         try:
-            detector = cv2.QRCodeDetector()
-            data, bbox, straight_qrcode = detector.detectAndDecode(image)
-            if bbox is not None and data != "":
+            data, bbox, _ = self.detector.detectAndDecode(image)
+            if bbox is not None and data != "" and data not in IGNORED_PAYLOADS:
                 return data
         except Exception as e:
             self.get_logger().debug(f"OpenCV QR Detection failed: {e}")
 
-        # --- Method 2: Placeholder for Pyzbar ---
-        if pyzbar is not None and (self.now - self.last_pyzbar_attempt) >= self.pyzbar_cooldown:
-            self.last_pyzbar_attempt = self.now
-            try:
-                decoded_objects = pyzbar.decode(image)
-                for obj in decoded_objects:
-                    return obj.data.decode('utf-8')
-            except Exception as e:
-                self.get_logger().debug(f"pyzbar QR Detection failed: {e}")
-
         return None
+
 
 def main(args=None):
     rclpy.init(args=args)
@@ -154,6 +222,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
