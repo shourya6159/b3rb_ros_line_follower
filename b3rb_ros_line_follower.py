@@ -31,6 +31,9 @@ SPEED_MAX = 0.2  # Speed capped at 0.2 for precise control dynamically
 TURN_MIN = -1.0
 TURN_MAX = 1.0
 
+# --- TWEAKABLE TIMERS & DISTANCES ---
+SIGN_TIMEOUT = 0.5  # Seconds to wait after the last sign message before executing the turn
+# ------------------------------------
 
 class LineFollower(Node):
     """
@@ -108,6 +111,14 @@ class LineFollower(Node):
         self.mission_completed = False
 
         self.latest_sign_board_info = {"A": 7, "B": 7, "C": 7, "X": 7, "Y": 7, "Z": 7}
+        
+        # --- Memory to delay turns until the sign is passed ---
+        self.last_sign_msg = ""
+        self.last_sign_time = 0.0
+        self.pending_turn_direction = 0.0
+        
+        # Signboard state: 0.0 (Center), 1.0 (Blind to Left / Go Right), -1.0 (Blind to Right / Go Left)
+        self.active_turn_direction = 0.0
 
         self.latest_uid = -1
         self.latest_ack = -1
@@ -149,10 +160,18 @@ class LineFollower(Node):
         vectors = message
         half_width = vectors.image_width / 2.0
 
+        # --- NEW TIMEOUT LOGIC ---
+        # Check if we have a pending turn AND the sign has left the camera's view
+        if self.pending_turn_direction != 0.0 and (time.time() - self.last_sign_time > SIGN_TIMEOUT):
+            self.active_turn_direction = self.pending_turn_direction
+            self.pending_turn_direction = 0.0  # Clear pending so it only activates once
+            state_str = "CENTER" if self.active_turn_direction == 0.0 else ("RIGHT" if self.active_turn_direction == 1.0 else "LEFT")
+            self.get_logger().info(f"[STATE] Sign passed! Executing locked turn to: {state_str}")
+
         if vectors.vector_count == 0:  # None seen
             speed = 0.2
-            if self.latest_sign_board_info.get(self.current_destination, 7) != 7:
-                turn = self.latest_sign_board_info[self.current_destination] * -1.0
+            if self.active_turn_direction != 0.0:
+                turn = self.active_turn_direction * -1.0
             else:
                 turn = 0.0
 
@@ -181,6 +200,7 @@ class LineFollower(Node):
                         turn = (line_slope + (half_width - target_x)) / half_width
                 speed = 0.15
             else:
+                # Same slope-following logic logic for 1 vector
                 deviation = vectors.vector_1[1].x - vectors.vector_1[0].x
                 turn = deviation / half_width
                 speed = 0.2
@@ -190,7 +210,7 @@ class LineFollower(Node):
             middle_x_right = (vectors.vector_2[0].x + vectors.vector_2[1].x) / 2.0
             
             if self.obstacle_in_front:
-                #Turn off center-following
+                # [OVERRIDE]: Turn off center-following to dodge obstacle
                 safe_margin = half_width * 0.25  #Distance to maintain from the correct edge line                
                 if self.avoidance_direction == "RIGHT":
                     target_x = middle_x_right - safe_margin
@@ -201,8 +221,25 @@ class LineFollower(Node):
                     
                 turn = (line_slope + (half_width - target_x)) / half_width
                 speed = 0.15
+                
+            elif self.active_turn_direction == 1.0:
+                # [BLIND TO LEFT]: Turning right based on sign board.
+                # Uses only vector_2 slope to stay parallel (centered) but follow the right side.
+                deviation = vectors.vector_2[1].x - vectors.vector_2[0].x
+                turn = deviation / half_width
+                
+                speed = 0.2
+                
+            elif self.active_turn_direction == -1.0:
+                # [BLIND TO RIGHT]: Turning left based on sign board.
+                # Uses only vector_1 slope to stay parallel (centered) but follow the left side.
+                deviation = vectors.vector_1[1].x - vectors.vector_1[0].x
+                turn = deviation / half_width
+                self.get_logger().info("HELLOBRO")
+                speed = 0.2
+
             else:
-                #Center following
+                # [NORMAL]: Center following using both lines
                 middle_x = (middle_x_left + middle_x_right) / 2.0
                 deviation = half_width - middle_x
                 turn = deviation / half_width
@@ -241,21 +278,32 @@ class LineFollower(Node):
                 return
 
         else:
-            #front obstacle detection
+            # front obstacle detection
+            cr=0
+            cl=0
             mid = num_readings // 2
             front_right_sector = list(message.ranges[mid - 80 : mid])
             front_left_sector = list(message.ranges[mid : mid + 80])
+            for r in front_right_sector:
+                if r<1 and r>0.1:
+                    cr+=1
             
-            valid_right = [r for r in front_right_sector if r > 0.1 and not math.isinf(r)]
-            valid_left = [r for r in front_left_sector if r > 0.1 and not math.isinf(r)]
+            for r in front_left_sector:
+                if r<1 and r>0.1:
+                    cl+=1
+        
+            # valid_right = [r for r in front_right_sector if r > 0.1 and not math.isinf(r)]
+            # valid_left = [r for r in front_left_sector if r > 0.1 and not math.isinf(r)]
             
-            min_right = min(valid_right) if valid_right else float('inf')
-            min_left = min(valid_left) if valid_left else float('inf')
+            # min_right = min(valid_right) if valid_right else float('inf')
+            # min_left = min(valid_left) if valid_left else float('inf')
             
             #If an object is detected within 1.2 meters
-            if min_right < 1.2 or min_left < 1.2:
+            if cr>=10 or cl>=10:
                 self.obstacle_in_front = True
-                if min_left < min_right:
+                self.active_turn_direction = 0.0 # Clear the signboard lock if an obstacle appears
+                
+                if cl > cr:
                     #Obstacle is closer on the left side of the track.Dodge right
                     self.avoidance_direction = "RIGHT"
                 else:
@@ -337,18 +385,39 @@ class LineFollower(Node):
     def sign_board_callback(self, message):
         """Receives traffic sign board direction hints."""
         try:
-            sign_data = dict(message.data)
-            update = True
+            # Safely parse the string to JSON instead of using dict()
+            clean_string = message.data.replace("'", '"')
+            sign_data_raw = json.loads(clean_string)
+            
+            direction_map = {"Left": -1.0, "Right": 1.0, "Straight": 0.0}
+            sign_data = {}
+            for label, direction in sign_data_raw.items():
+                if direction in direction_map:
+                    sign_data[label] = direction_map[direction]
 
+            update = True
             for label in ["A","B","C","X","Y","Z"]:
                 if not label in sign_data:
                     update = False
                     break
 
-            if(update): self.latest_sign_board_info.update(sign_data)
+            if update: 
+                # The sign is currently in frame. Keep resetting the timer!
+                self.last_sign_time = time.time()
+                
+                # Ignore duplicate consecutive messages to save processing
+                if message.data == self.last_sign_msg:
+                    return
+                self.last_sign_msg = message.data
+                
+                self.latest_sign_board_info.update(sign_data)
+                
+                # Assign to PENDING state (waits for the sign to leave the camera frame)
+                if self.current_destination in sign_data:
+                    self.pending_turn_direction = sign_data[self.current_destination]
             
         except Exception:
-            self.get_logger().info(f"Heard Sign Board: {message.data}")
+            pass # Removed logging to prevent terminal spam for invalid messages
 
 
 def main(args=None):
