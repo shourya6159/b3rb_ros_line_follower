@@ -36,6 +36,7 @@ class QRDetector(Node):
 
         self.loss_grace_period = 0.3
         self.pyzbar_cooldown = 0.3
+        self.now = time.monotonic()
 
         self.last_published = None      # last payload string we actually published (None or "RESET")
         self.last_seen_data = None      # last successfully decoded payload (regardless of publish)
@@ -66,7 +67,7 @@ class QRDetector(Node):
         if image is None:
             return
 
-        now= time.monotonic()
+        self.now= time.monotonic()
         qr_data = self.detect_qr_code(image)
 
 
@@ -74,7 +75,7 @@ class QRDetector(Node):
             # Publish the decoded QR payload
 
             self.last_seen_data = qr_data
-            self.last_seen_time = now
+            self.last_seen_time = self.now
             self._maybe_publish(qr_data)
  
 
@@ -83,7 +84,7 @@ class QRDetector(Node):
         #    self.publisher_qr.publish(msg)
         #    self.get_logger().info(f"Published QR Data: {qr_data}")
         else:
-            self._check_for_loss(now)
+            self._check_for_loss()
 
     def _maybe_publish(self, qr_data):
         """Publish only if this payload differs from the last one we published."""
@@ -91,7 +92,7 @@ class QRDetector(Node):
             return
         self._publish(qr_data)
 
-    def _check_for_loss(self, now):
+    def _check_for_loss(self):
         """If a tracked code hasn't been seen for longer than the grace period,
         publish a single RESET and clear tracking state."""
         if self.last_seen_time is None:
@@ -100,7 +101,7 @@ class QRDetector(Node):
         if self.last_published == "RESET":
             return  # already reset, don't spam
  
-        if (now - self.last_seen_time) >= self.loss_grace_period:
+        if (self.now - self.last_seen_time) >= self.loss_grace_period:
             self._publish("RESET")
             self.last_seen_data = None
             self.last_seen_time = None
@@ -132,8 +133,8 @@ class QRDetector(Node):
             self.get_logger().debug(f"OpenCV QR Detection failed: {e}")
 
         # --- Method 2: Placeholder for Pyzbar ---
-        if pyzbar is not None and (now - self.last_pyzbar_attempt) >= self.pyzbar_cooldown:
-            self.last_pyzbar_attempt = now
+        if pyzbar is not None and (self.now - self.last_pyzbar_attempt) >= self.pyzbar_cooldown:
+            self.last_pyzbar_attempt = self.now
             try:
                 decoded_objects = pyzbar.decode(image)
                 for obj in decoded_objects:
