@@ -27,13 +27,10 @@ PI = math.pi
 
 # Control bounds
 SPEED_MIN = 0.0
-SPEED_MAX = 0.2  # Speed capped at 0.2 for precise control dynamically
+SPEED_MAX = 0.7  # Speed capped at 0.2 for precise control dynamically
 TURN_MIN = -1.0
 TURN_MAX = 1.0
 
-# --- TWEAKABLE TIMERS & DISTANCES ---
-SIGN_TIMEOUT = 0.5  # Seconds to wait after the last sign message before executing the turn
-# ------------------------------------
 
 class LineFollower(Node):
     """
@@ -107,18 +104,13 @@ class LineFollower(Node):
         self.near_building = False
         self.patient_id = None
         self.hospital_id = None
-        self.current_destination = "A"  # Default destination is patient A
+        self.current_destination = "PATIENT_2"  # Default destination is patient A
+        self.msg_sent = ""
+        self.last_msg_sent = ""
+        self.stop = False
         self.mission_completed = False
 
-        self.latest_sign_board_info = {"A": 7, "B": 7, "C": 7, "X": 7, "Y": 7, "Z": 7}
-        
-        # --- Memory to delay turns until the sign is passed ---
-        self.last_sign_msg = ""
-        self.last_sign_time = 0.0
-        self.pending_turn_direction = 0.0
-        
-        # Signboard state: 0.0 (Center), 1.0 (Blind to Left / Go Right), -1.0 (Blind to Right / Go Left)
-        self.active_turn_direction = 0.0
+        self.latest_sign_board_info = {"A": "", "B": "", "C": "", "X": "", "Y": "", "Z": ""}
 
         self.latest_uid = -1
         self.latest_ack = -1
@@ -160,18 +152,13 @@ class LineFollower(Node):
         vectors = message
         half_width = vectors.image_width / 2.0
 
-        # --- NEW TIMEOUT LOGIC ---
-        # Check if we have a pending turn AND the sign has left the camera's view
-        if self.pending_turn_direction != 0.0 and (time.time() - self.last_sign_time > SIGN_TIMEOUT):
-            self.active_turn_direction = self.pending_turn_direction
-            self.pending_turn_direction = 0.0  # Clear pending so it only activates once
-            state_str = "CENTER" if self.active_turn_direction == 0.0 else ("RIGHT" if self.active_turn_direction == 1.0 else "LEFT")
-            self.get_logger().info(f"[STATE] Sign passed! Executing locked turn to: {state_str}")
-
         if vectors.vector_count == 0:  # None seen
             speed = 0.2
-            if self.active_turn_direction != 0.0:
-                turn = self.active_turn_direction * -1.0
+            if self.latest_sign_board_info.get(self.current_destination, 7) != 7:
+                if(self.latest_sign_board_info[self.current_destination]=="Right"): turn = 1.0
+                elif(self.latest_sign_board_info[self.current_destination]=="Left"): turn = -1.0
+                elif(self.latest_sign_board_info[self.current_destination]=="Straight"): turn = 0.0
+
             else:
                 turn = 0.0
 
@@ -200,7 +187,6 @@ class LineFollower(Node):
                         turn = (line_slope + (half_width - target_x)) / half_width
                 speed = 0.15
             else:
-                # Same slope-following logic logic for 1 vector
                 deviation = vectors.vector_1[1].x - vectors.vector_1[0].x
                 turn = deviation / half_width
                 speed = 0.2
@@ -210,7 +196,7 @@ class LineFollower(Node):
             middle_x_right = (vectors.vector_2[0].x + vectors.vector_2[1].x) / 2.0
             
             if self.obstacle_in_front:
-                # [OVERRIDE]: Turn off center-following to dodge obstacle
+                #Turn off center-following
                 safe_margin = half_width * 0.25  #Distance to maintain from the correct edge line                
                 if self.avoidance_direction == "RIGHT":
                     target_x = middle_x_right - safe_margin
@@ -221,25 +207,8 @@ class LineFollower(Node):
                     
                 turn = (line_slope + (half_width - target_x)) / half_width
                 speed = 0.15
-                
-            elif self.active_turn_direction == 1.0:
-                # [BLIND TO LEFT]: Turning right based on sign board.
-                # Uses only vector_2 slope to stay parallel (centered) but follow the right side.
-                deviation = vectors.vector_2[1].x - vectors.vector_2[0].x
-                turn = deviation / half_width
-                
-                speed = 0.2
-                
-            elif self.active_turn_direction == -1.0:
-                # [BLIND TO RIGHT]: Turning left based on sign board.
-                # Uses only vector_1 slope to stay parallel (centered) but follow the left side.
-                deviation = vectors.vector_1[1].x - vectors.vector_1[0].x
-                turn = deviation / half_width
-                self.get_logger().info("HELLOBRO")
-                speed = 0.2
-
             else:
-                # [NORMAL]: Center following using both lines
+                #Center following
                 middle_x = (middle_x_left + middle_x_right) / 2.0
                 deviation = half_width - middle_x
                 turn = deviation / half_width
@@ -247,63 +216,63 @@ class LineFollower(Node):
 
         if (turn > 0.4 or turn < -0.4) and not self.obstacle_in_front:
             speed = 0.2
+
+        if(self.stop): speed = 0.0
+
+        
         self.rover_move_manual_mode(speed, turn)
 
     def lidar_callback(self, message):
         """Receives LIDAR range measurements to check building proximity or obstacles."""
         num_readings = len(message.ranges)
 
-        if self.lidar_ph_override == True:
+        if self.lidar_ph_override == True and self.msg_sent == self.current_destination:
             # ----------------------------------------------------
             # STEP 1: Building Proximity Detection (Patient/Hospital)
             # ----------------------------------------------------
             print("XXXXXXXXXXXXXXXSTEP-2")
+            self.get_logger().info("HEHHHHHHHHEEEEEEEEEE0000000000000000000")
             right_side = list(message.ranges[82:98])
             num_sides_detected_right = 0
             left_side = list(message.ranges[262:278])
             num_sides_detected_left = 0
 
             for x in right_side:
-                if x < 1.0:
+                if x < 2.0:
                     num_sides_detected_right += 1
 
             for x in left_side:
-                if x < 1.0:
+                if x < 2.0:
                     num_sides_detected_left += 1
 
-            if num_sides_detected_right >= 7 or num_sides_detected_left >= 7:
+            if num_sides_detected_right >= 5 or num_sides_detected_left >= 5:
                 print("XXXXXXXXXXXXXXXSTEP-3")
                 self.on_destination = True
-                self.send_server_update(self.current_destination)
+
+                if(self.last_msg_sent != self.msg_sent):
+                    self.send_server_update(self.msg_sent)
+                    self.get_logger().info("HEHHHHHHHHEEEEEEEEEEE111111111111111111")
+                    self.last_msg_sent = self.msg_sent
+                    self.stop = True
+
                 return
 
         else:
-            # front obstacle detection
-            cr=0
-            cl=0
+            #front obstacle detection
             mid = num_readings // 2
             front_right_sector = list(message.ranges[mid - 80 : mid])
             front_left_sector = list(message.ranges[mid : mid + 80])
-            for r in front_right_sector:
-                if r<1 and r>0.1:
-                    cr+=1
             
-            for r in front_left_sector:
-                if r<1 and r>0.1:
-                    cl+=1
-        
-            # valid_right = [r for r in front_right_sector if r > 0.1 and not math.isinf(r)]
-            # valid_left = [r for r in front_left_sector if r > 0.1 and not math.isinf(r)]
+            valid_right = [r for r in front_right_sector if r > 0.1 and not math.isinf(r)]
+            valid_left = [r for r in front_left_sector if r > 0.1 and not math.isinf(r)]
             
-            # min_right = min(valid_right) if valid_right else float('inf')
-            # min_left = min(valid_left) if valid_left else float('inf')
+            min_right = min(valid_right) if valid_right else float('inf')
+            min_left = min(valid_left) if valid_left else float('inf')
             
             #If an object is detected within 1.2 meters
-            if cr>=10 or cl>=10:
+            if min_right < 1.2 or min_left < 1.2:
                 self.obstacle_in_front = True
-                self.active_turn_direction = 0.0 # Clear the signboard lock if an obstacle appears
-                
-                if cl > cr:
+                if min_left < min_right:
                     #Obstacle is closer on the left side of the track.Dodge right
                     self.avoidance_direction = "RIGHT"
                 else:
@@ -327,6 +296,7 @@ class LineFollower(Node):
                 # Parse server assignment payload if present
                 if message.msg:
                     self.current_destination = message.msg
+                    self.stop = False
 
     def send_server_update(self, text_msg):
         """Sends status messages to the server with retry/acknowledgement mechanism."""
@@ -372,52 +342,34 @@ class LineFollower(Node):
 
     def qr_detection_callback(self, message):
         """Receives QR codes scanned from buildings and manages frame transitions."""
-        if message.data:
-            self.get_logger().info(f"Heard QR code: {message.data}")
-            self.current_location_qr = True
-        else:
+        
+        if message.data == "RESET":
             # QR went out of frame -> Trigger reset message and enable LIDAR building scan
             if self.current_location_qr:
                 self.current_location_qr = False
-                self.send_server_update("RESET")
+                # self.send_server_update("RESET")
                 self.lidar_ph_override = True
+        elif message.data:
+                    self.get_logger().info(f"Heard QR code: {message.data}")
+                    self.current_location_qr = True
+                    if(self.msg_sent != message.data):
+                        self.msg_sent = message.data
 
     def sign_board_callback(self, message):
         """Receives traffic sign board direction hints."""
         try:
-            # Safely parse the string to JSON instead of using dict()
-            clean_string = message.data.replace("'", '"')
-            sign_data_raw = json.loads(clean_string)
-            
-            direction_map = {"Left": -1.0, "Right": 1.0, "Straight": 0.0}
-            sign_data = {}
-            for label, direction in sign_data_raw.items():
-                if direction in direction_map:
-                    sign_data[label] = direction_map[direction]
-
+            sign_data = dict(message.data)
             update = True
+
             for label in ["A","B","C","X","Y","Z"]:
                 if not label in sign_data:
                     update = False
                     break
 
-            if update: 
-                # The sign is currently in frame. Keep resetting the timer!
-                self.last_sign_time = time.time()
-                
-                # Ignore duplicate consecutive messages to save processing
-                if message.data == self.last_sign_msg:
-                    return
-                self.last_sign_msg = message.data
-                
-                self.latest_sign_board_info.update(sign_data)
-                
-                # Assign to PENDING state (waits for the sign to leave the camera frame)
-                if self.current_destination in sign_data:
-                    self.pending_turn_direction = sign_data[self.current_destination]
+            if(update): self.latest_sign_board_info.update(sign_data)
             
         except Exception:
-            pass # Removed logging to prevent terminal spam for invalid messages
+            self.get_logger().info(f"Heard Sign Board: {message.data}")
 
 
 def main(args=None):
