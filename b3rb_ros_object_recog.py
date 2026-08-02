@@ -21,6 +21,7 @@ import numpy as np
 import os
 
 from ultralytics import YOLO
+from ament_index_python.packages import get_package_share_directory
 
 # HINT: TensorFlow/Keras can be heavy and might not be installed by default.
 # We wrap the import in a try-except block so the node runs even if TensorFlow is missing.
@@ -50,8 +51,18 @@ class ObjectRecognizer(Node):
             String,
             '/sign_board_detection',
             10)
+        
+        share_dir = get_package_share_directory('b3rb_ros_line_follower')
+        workspace_root = os.path.abspath(os.path.join(share_dir, '..', '..', '..', '..'))
 
-        self.raw_model_path = "~/cognipilot/cranium/src/b3rb_ros_line_follower/b3rb_ros_line_follower/b3rb_ros_line_follower/runs/detect/NPX_SIGN_CLASSIFIER/yolo11n_sign_classifier-3/weights/best.pt"
+        self.raw_model_path = os.path.join(
+            workspace_root, 
+            'src',
+            'b3rb_ros_line_follower',
+            'b3rb_ros_line_follower',
+            'b3rb_ros_line_follower',
+            'best.pt'
+)
 
         self.model = YOLO(os.path.expanduser(self.raw_model_path))
         if(self.model is None): self.get_logger().info("Model couldn't be loaded!!!")
