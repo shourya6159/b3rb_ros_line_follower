@@ -21,16 +21,34 @@ import json
 from sensor_msgs.msg import Joy, LaserScan
 from std_msgs.msg import String
 from synapse_msgs.msg import EdgeVectors, ServerCommunication
+from enum import IntEnum, auto
 
 QOS_PROFILE_DEFAULT = 10
 PI = math.pi
 
 # Control bounds
 SPEED_MIN = 0.0
-SPEED_MAX = 0.7  # Speed capped at 0.2 for precise control dynamically
+SPEED_MAX = 2.0  # Speed capped at 0.2 for precise control dynamically
 TURN_MIN = -1.0
 TURN_MAX = 1.0
 
+SCALE = 6.0
+
+SIGN_TIMEOUT = 12.0/SCALE
+
+class SignState(IntEnum):
+    FINDING = auto()
+    FOUND = auto()
+    CROSSED = auto()
+
+class State(IntEnum):
+    TURNING_LEFT = auto()
+    TURNING_RIGHT = auto()
+    TURNING_STRAIGHT = auto()
+    LINE_FOLLOWING = auto()
+    STOPPED = auto()
+    OBSTACLE_AVOIDING_RIGHT = auto()
+    OBSTACLE_AVOIDING_LEFT = auto()
 
 class LineFollower(Node):
     """
@@ -47,6 +65,7 @@ class LineFollower(Node):
             '/edge_vectors',
             self.edge_vectors_callback,
             QOS_PROFILE_DEFAULT)
+        
 
         # 2. LIDAR Obstacle Scanner
         self.subscription_lidar = self.create_subscription(
@@ -95,8 +114,13 @@ class LineFollower(Node):
         # Default controls
         self.target_speed = 0.2
         self.target_turn = 0.0
+        self.turn = 0.0
 
         # State variables
+        self.buggy_state = State.LINE_FOLLOWING
+        self.sign_state = SignState.FINDING
+        self.turn_start_time = self.get_clock().now().nanoseconds / 1e9
+
         self.current_location_qr = False
         self.lidar_ph_override = False
         self.obstacle_in_front = False
@@ -104,13 +128,18 @@ class LineFollower(Node):
         self.near_building = False
         self.patient_id = None
         self.hospital_id = None
-        self.current_destination = "PATIENT_2"  # Default destination is patient A
+        self.current_destination = "A"  # Default destination is patient A
         self.msg_sent = ""
         self.last_msg_sent = ""
         self.stop = False
+        self.last=0.0
         self.mission_completed = False
+        self.turn_direction = "Straight"
+
+        self.last_sign_time = 0.0
 
         self.latest_sign_board_info = {"A": "", "B": "", "C": "", "X": "", "Y": "", "Z": ""}
+        self.mappings = {"PATIENT_1" : "A", "PATIENT_2" : "B", "PATIENT_3" : "C", "HOSPITAL_1" : "X", "HOSPITAL_2" : "Y", "HOSPITAL_3" : "Z"}
 
         self.latest_uid = -1
         self.latest_ack = -1
@@ -138,46 +167,100 @@ class LineFollower(Node):
 
     def edge_vectors_callback(self, message):
         """Receives lane boundaries from camera vector extractor and computes steering."""
-        speed = SPEED_MAX
+        speed = 0.0
         turn = 0.0
+        current_time = self.get_clock().now().nanoseconds / 1e9
 
-        if self.on_destination == True:
-            self.rover_move_manual_mode(0.0, 0.0)
-            return
-
-        if self.current_destination == "0":
-            self.rover_move_manual_mode(0.0, 0.0)
-            return
+        self.get_logger().info(f"{current_time-self.last_sign_time} , {self.buggy_state}, {self.sign_state}")
 
         vectors = message
-        half_width = vectors.image_width / 2.0
+        image_width = vectors.image_width
+        half_width = image_width/2
 
-        if vectors.vector_count == 0:  # None seen
-            speed = 0.2
-            if self.latest_sign_board_info.get(self.current_destination, 7) != 7:
-                if(self.latest_sign_board_info[self.current_destination]=="Right"): turn = 1.0
-                elif(self.latest_sign_board_info[self.current_destination]=="Left"): turn = -1.0
-                elif(self.latest_sign_board_info[self.current_destination]=="Straight"): turn = 0.0
+        if current_time - self.last_sign_time > SIGN_TIMEOUT and self.sign_state == SignState.FOUND:
+            self.sign_state = SignState.CROSSED
 
-            else:
-                turn = 0.0
 
-        elif vectors.vector_count == 1:  # Curve / Single lane boundary
-            if self.obstacle_in_front:
-                vector_center_x = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
-                line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
-                safe_margin = half_width * 0.45  # Distance to maintain from the edge vector
-                
-                if self.avoidance_direction == "RIGHT":
-                    if vector_center_x < half_width:
-                        #We see the left line .steer away from it
-                        turn = -0.6
+        match self.buggy_state:
+            case State.LINE_FOLLOWING:
+                if(self.stop):
+                    self.buggy_state = State.STOPPED
+
+                elif(self.obstacle_in_front):
+                    if(self.avoidance_direction == "RIGHT"):
+                        self.buggy_state = State.OBSTACLE_AVOIDING_RIGHT
                     else:
-                        #We see the right line maintain safe offset distance.
-                        target_x = vector_center_x - safe_margin
-                        turn = (line_slope + (half_width - target_x)) / half_width
-                else:
-                    #Dodging left
+                        self.buggy_state = State.OBSTACLE_AVOIDING_LEFT
+                
+                elif(self.sign_state == SignState.CROSSED):
+
+                    match self.latest_sign_board_info[self.current_destination]:
+                        case "Straight":
+                            self.buggy_state = State.TURNING_STRAIGHT
+                        case "Left":
+                            self.buggy_state = State.TURNING_LEFT
+                        case "Right":
+                            self.buggy_state = State.TURNING_RIGHT
+                        case _:
+                            pass
+                    self.turn_start_time = current_time
+
+            case State.TURNING_LEFT:
+                if(current_time - self.turn_start_time > 9.0/SCALE):
+                    self.buggy_state = State.LINE_FOLLOWING
+                    self.sign_state = SignState.FINDING
+
+            case State.TURNING_RIGHT:
+                if(current_time - self.turn_start_time > 9.0/SCALE):
+                    self.buggy_state = State.LINE_FOLLOWING
+                    self.sign_state = SignState.FINDING
+
+            case State.TURNING_STRAIGHT:
+                if(current_time - self.turn_start_time > 2.0/SCALE):
+                    self.buggy_state = State.LINE_FOLLOWING
+                    self.sign_state = SignState.FINDING
+
+            case State.STOPPED:
+                if(not self.stop): self.buggy_state = State.LINE_FOLLOWING
+
+            case State.OBSTACLE_AVOIDING_RIGHT:
+                if(not self.obstacle_in_front):
+                    self.buggy_state = State.LINE_FOLLOWING
+
+            case State.OBSTACLE_AVOIDING_LEFT:
+                if(not self.obstacle_in_front):
+                    self.buggy_state = State.LINE_FOLLOWING
+
+
+
+        match self.buggy_state:
+            case State.LINE_FOLLOWING:
+                if vectors.vector_count == 0:  # None seen
+                    turn = 0.0
+
+                elif vectors.vector_count == 1:  # Curve / Single lane boundary
+                    deviation = vectors.vector_1[1].x - vectors.vector_1[0].x
+                    turn = deviation / half_width
+
+                elif vectors.vector_count == 2:  # Straight track / Both boundaries visible
+                    middle_x_left = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    middle_x_right = (vectors.vector_2[0].x + vectors.vector_2[1].x) / 2.0
+                    
+                    middle_x = (middle_x_left + middle_x_right) / 2.0
+                    deviation = half_width - middle_x
+                    turn = deviation / half_width
+
+                speed = 0.2 * SCALE
+
+            case State.TURNING_LEFT:
+                if vectors.vector_count == 0:
+                    turn = 0.6
+
+                elif vectors.vector_count == 1:
+                    vector_center_x = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
+                    safe_margin = half_width*0.45
+
                     if vector_center_x > half_width:
                         # We see the right line .steer away from it
                         turn = 0.6
@@ -185,41 +268,116 @@ class LineFollower(Node):
                         # We see the left line maintain safe distance.
                         target_x = vector_center_x + safe_margin
                         turn = (line_slope + (half_width - target_x)) / half_width
-                speed = 0.15
-            else:
-                deviation = vectors.vector_1[1].x - vectors.vector_1[0].x
-                turn = deviation / half_width
-                speed = 0.2
 
-        elif vectors.vector_count == 2:  # Straight track / Both boundaries visible
-            middle_x_left = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
-            middle_x_right = (vectors.vector_2[0].x + vectors.vector_2[1].x) / 2.0
-            
-            if self.obstacle_in_front:
-                #Turn off center-following
-                safe_margin = half_width * 0.25  #Distance to maintain from the correct edge line                
-                if self.avoidance_direction == "RIGHT":
-                    target_x = middle_x_right - safe_margin
-                    line_slope = vectors.vector_2[1].x - vectors.vector_2[0].x
-                else:
+                elif vectors.vector_count == 2:
+                    middle_x_left = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    safe_margin = half_width*0.45
+
                     target_x = middle_x_left + safe_margin
                     line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
                     
-                turn = (line_slope + (half_width - target_x)) / half_width
-                speed = 0.15
-            else:
-                #Center following
-                middle_x = (middle_x_left + middle_x_right) / 2.0
-                deviation = half_width - middle_x
-                turn = deviation / half_width
-                speed = 0.2
+                    turn = (line_slope + (half_width - target_x)) / half_width
 
-        if (turn > 0.4 or turn < -0.4) and not self.obstacle_in_front:
-            speed = 0.2
+                speed = 0.15 * SCALE
 
-        if(self.stop): speed = 0.0
+            case State.TURNING_RIGHT:
+                if vectors.vector_count == 0:
+                    turn = -0.6
 
-        
+                elif vectors.vector_count == 1:
+                    vector_center_x = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
+                    safe_margin = half_width*0.45
+
+                    if vector_center_x < half_width:
+                        #We see the left line .steer away from it
+                        turn = -0.6
+                    else:
+                        #We see the right line maintain safe offset distance.
+                        target_x = vector_center_x - safe_margin
+                        turn = (line_slope + (half_width - target_x)) / half_width
+
+                elif vectors.vector_count == 2:
+                    middle_x_right = (vectors.vector_2[0].x + vectors.vector_2[1].x) / 2.0
+                    safe_margin = half_width*0.45
+
+                    target_x = middle_x_right - safe_margin
+                    line_slope = vectors.vector_2[1].x - vectors.vector_2[0].x
+                    
+                    turn = (line_slope + (half_width - target_x)) / half_width
+
+                speed = 0.15 * SCALE
+
+            case State.TURNING_STRAIGHT:
+                turn = 0.0
+                speed = 0.2 * SCALE
+
+            case State.STOPPED:
+                turn = 0.0
+                speed = 0.0
+
+            case State.OBSTACLE_AVOIDING_RIGHT:
+                if vectors.vector_count == 1:
+                    vector_center_x = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
+                    safe_margin = half_width * 0.45  # Distance to maintain from the edge vector
+                    
+                    if vector_center_x < half_width:
+                        #We see the left line .steer away from it
+                        turn = -0.6
+                    else:
+                        #We see the right line maintain safe offset distance.
+                        target_x = vector_center_x - safe_margin
+                        turn = (line_slope + (half_width - target_x)) / half_width
+                    speed = 0.15 * SCALE
+
+                elif vectors.vector_count == 2:
+                    middle_x_left = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    middle_x_right = (vectors.vector_2[0].x + vectors.vector_2[1].x) / 2.0
+                    
+                    # [OVERRIDE]: Turn off center-following to dodge obstacle
+                    safe_margin = half_width * 0.25  #Distance to maintain from the correct edge line                
+                    target_x = middle_x_right - safe_margin
+                    line_slope = vectors.vector_2[1].x - vectors.vector_2[0].x
+                    
+                    turn = (line_slope + (half_width - target_x)) / half_width
+                    speed = 0.15 * SCALE
+
+                else:
+                    turn = -0.6
+                    speed = 0.15 * SCALE
+
+            case State.OBSTACLE_AVOIDING_LEFT:
+                if vectors.vector_count == 1:
+                    vector_center_x = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
+                    safe_margin = half_width * 0.45  # Distance to maintain from the edge vector
+                    
+                    if vector_center_x > half_width:
+                        # We see the right line .steer away from it
+                        turn = 0.6
+                    else:
+                        # We see the left line maintain safe distance.
+                        target_x = vector_center_x + safe_margin
+                        turn = (line_slope + (half_width - target_x)) / half_width
+                    speed = 0.15 * SCALE
+
+                elif vectors.vector_count == 2:
+                    middle_x_left = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
+                    middle_x_right = (vectors.vector_2[0].x + vectors.vector_2[1].x) / 2.0
+                    
+                    # [OVERRIDE]: Turn off center-following to dodge obstacle
+                    safe_margin = half_width * 0.25  #Distance to maintain from the correct edge line                
+                    target_x = middle_x_left + safe_margin
+                    line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
+                        
+                    turn = (line_slope + (half_width - target_x)) / half_width
+                    speed = 0.15 * SCALE
+                else:
+                    turn = 0.6
+                    speed = 0.15 * SCALE
+
+
         self.rover_move_manual_mode(speed, turn)
 
     def lidar_callback(self, message):
@@ -232,9 +390,9 @@ class LineFollower(Node):
             # ----------------------------------------------------
             print("XXXXXXXXXXXXXXXSTEP-2")
             self.get_logger().info("HEHHHHHHHHEEEEEEEEEE0000000000000000000")
-            right_side = list(message.ranges[82:98])
+            right_side = list(message.ranges[80:92])
             num_sides_detected_right = 0
-            left_side = list(message.ranges[262:278])
+            left_side = list(message.ranges[268:280])
             num_sides_detected_left = 0
 
             for x in right_side:
@@ -245,13 +403,12 @@ class LineFollower(Node):
                 if x < 2.0:
                     num_sides_detected_left += 1
 
-            if num_sides_detected_right >= 5 or num_sides_detected_left >= 5:
+            if num_sides_detected_right >= 9 or num_sides_detected_left >= 9:
                 print("XXXXXXXXXXXXXXXSTEP-3")
                 self.on_destination = True
 
                 if(self.last_msg_sent != self.msg_sent):
                     self.send_server_update(self.msg_sent)
-                    self.get_logger().info("HEHHHHHHHHEEEEEEEEEEE111111111111111111")
                     self.last_msg_sent = self.msg_sent
                     self.stop = True
 
@@ -260,19 +417,21 @@ class LineFollower(Node):
         else:
             #front obstacle detection
             mid = num_readings // 2
-            front_right_sector = list(message.ranges[mid - 80 : mid])
-            front_left_sector = list(message.ranges[mid : mid + 80])
+            cr = cl = 0
+            front_right_sector = list(message.ranges[mid - 20 : mid])
+            front_left_sector = list(message.ranges[mid : mid + 20])
+
+            for r in front_right_sector:
+                if(r<1.2 and r>0.1): cr+=1
+
+            for r in front_left_sector:
+                if(r<1.2 and r>0.1): cl+=1
             
-            valid_right = [r for r in front_right_sector if r > 0.1 and not math.isinf(r)]
-            valid_left = [r for r in front_left_sector if r > 0.1 and not math.isinf(r)]
-            
-            min_right = min(valid_right) if valid_right else float('inf')
-            min_left = min(valid_left) if valid_left else float('inf')
             
             #If an object is detected within 1.2 meters
-            if min_right < 1.2 or min_left < 1.2:
+            if cr > 7 or cl > 7:
                 self.obstacle_in_front = True
-                if min_left < min_right:
+                if cl >= cr:
                     #Obstacle is closer on the left side of the track.Dodge right
                     self.avoidance_direction = "RIGHT"
                 else:
@@ -352,24 +511,44 @@ class LineFollower(Node):
         elif message.data:
                     self.get_logger().info(f"Heard QR code: {message.data}")
                     self.current_location_qr = True
-                    if(self.msg_sent != message.data):
-                        self.msg_sent = message.data
+                    decoded_data = self.mappings[self.legacy_to_json(message.data)]
+
+                    if(self.msg_sent != decoded_data):
+                        self.msg_sent = decoded_data
 
     def sign_board_callback(self, message):
         """Receives traffic sign board direction hints."""
         try:
-            sign_data = dict(message.data)
+            sign_data = json.loads(message.data.replace("'", '"'))
             update = True
+            self.last_sign_time = self.get_clock().now().nanoseconds / 1e9
 
             for label in ["A","B","C","X","Y","Z"]:
                 if not label in sign_data:
                     update = False
                     break
 
-            if(update): self.latest_sign_board_info.update(sign_data)
+            if(update):
+                if(self.sign_state == SignState.FINDING): self.sign_state = SignState.FOUND
+
+                self.latest_sign_board_info.update(sign_data)
+            # else:
+            #     if(self.sign_state == SignState.FOUND): self.sign_state = SignState.CROSSED
+
             
-        except Exception:
-            self.get_logger().info(f"Heard Sign Board: {message.data}")
+        except Exception as e:
+            self.get_logger().error(f"Error occurred: {str(e)}")
+
+    def legacy_to_json(self, legacy_str: str) -> str:
+        cleaned = legacy_str.strip().lstrip("{").rstrip("}")
+
+        if ":" not in cleaned:
+            raise ValueError("Invalid legacy format: Missing colon separator.")
+
+        key, value = cleaned.split(":", 1)
+
+        value_str = value.strip().strip("'\"")
+        return value_str
 
 
 def main(args=None):
