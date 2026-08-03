@@ -23,9 +23,9 @@ import numpy as np
 # Known decoy/fake QR codes on the track - any of these should be treated as
 # if nothing was decoded at all, and never published.
 IGNORED_PAYLOADS = {
-    'FAKE_HOSPITAL_1',
-    'FAKE_HOSPITAL_2',
-    'FAKE_HOSPITAL_3',
+    '{LOC: FAKE_HOSPITAL_1}',
+    '{LOC: FAKE_HOSPITAL_2}',
+    '{LOC: FAKE_HOSPITAL_3}',
 }
 
 try:
