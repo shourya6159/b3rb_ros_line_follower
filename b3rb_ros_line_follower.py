@@ -51,6 +51,9 @@ class State(IntEnum):
     OBSTACLE_AVOIDING_RIGHT = auto()
     OBSTACLE_AVOIDING_LEFT = auto()
 
+    SEND_SERVER_MSG = auto()
+    WAITING_FOR_SERVER_MSG = auto()
+
 class LineFollower(Node):
     """
     Core controller Node for the B3RB buggy integrated with NXP AIM Challenge logic.
@@ -122,6 +125,11 @@ class LineFollower(Node):
         self.sign_state = SignState.FINDING
         self.turn_start_time = self.get_clock().now().nanoseconds / 1e9
         self.SCALE = HIGH_SCALE
+        self.last_msg_sent_time = 0.0
+        self.acknowledged = False
+        self.tries = 0
+        self.go_to_server_state = False
+        self.server_msg_received = False
 
         self.current_location_qr = False
         self.lidar_ph_override = False
@@ -185,7 +193,14 @@ class LineFollower(Node):
 
         match self.buggy_state:
             case State.LINE_FOLLOWING:
-                if(self.stop):
+                if(self.go_to_server_state):
+                    self.buggy_state = State.SEND_SERVER_MSG
+                    self.last_msg_sent_time = current_time
+                    self.go_to_server_state = False
+                    self.acknowledged = False
+                    self.tries = 0
+
+                elif(self.stop):
                     self.buggy_state = State.STOPPED
 
                 elif(self.obstacle_in_front):
@@ -233,6 +248,19 @@ class LineFollower(Node):
                 if(not self.obstacle_in_front):
                     self.buggy_state = State.LINE_FOLLOWING
 
+            case State.SEND_SERVER_MSG:
+                if(self.acknowledged):
+                    self.buggy_state = State.WAITING_FOR_SERVER_MSG
+                    self.current_uid += 1
+                    self.server_msg_received = False
+
+            case State.WAITING_FOR_SERVER_MSG:
+                if(self.server_msg_received):
+                    self.stop = False
+                    self.buggy_state = State.LINE_FOLLOWING
+                    self.lidar_ph_override = False
+                    self.go_to_server_state = False
+
 
 
         match self.buggy_state:
@@ -254,7 +282,7 @@ class LineFollower(Node):
 
                 speed = 0.2 * self.SCALE
 
-                if(self.sign_state == SignState.FINDING or self.lidar_ph_override or self.current_location_qr): self.SCALE = HIGH_SCALE
+                if(self.sign_state == SignState.FINDING and not self.current_location_qr and abs(turn)<0.4): self.SCALE = HIGH_SCALE
                 else: self.SCALE = LOW_SCALE
 
             case State.TURNING_LEFT:
@@ -382,6 +410,23 @@ class LineFollower(Node):
                     turn = 0.6
                     speed = 0.15 * self.SCALE
 
+            case State.SEND_SERVER_MSG:
+                turn = 0.0
+                speed = 0.0
+
+                if(current_time - self.last_msg_sent_time >= 1.0):
+                    self.last_msg_sent_time = current_time
+
+                    if self.tries < 5:
+                        self.acknowledged = self.send_server_update(self.msg_sent, uid_increment = False)
+                        self.last_msg_sent = self.msg_sent
+
+                        self.tries += 1
+
+            case State.WAITING_FOR_SERVER_MSG:
+                speed = 0.0
+                turn = 0.0
+
 
         self.rover_move_manual_mode(speed, turn)
 
@@ -389,7 +434,7 @@ class LineFollower(Node):
         """Receives LIDAR range measurements to check building proximity or obstacles."""
         num_readings = len(message.ranges)
 
-        if self.lidar_ph_override == True and self.msg_sent == self.current_destination:
+        if self.lidar_ph_override and self.msg_sent == self.current_destination:
             # ----------------------------------------------------
             # STEP 1: Building Proximity Detection (Patient/Hospital)
             # ----------------------------------------------------
@@ -412,10 +457,8 @@ class LineFollower(Node):
                 print("XXXXXXXXXXXXXXXSTEP-3")
                 self.on_destination = True
 
-                if(self.last_msg_sent != self.msg_sent):
-                    self.send_server_update(self.msg_sent)
-                    self.last_msg_sent = self.msg_sent
-                    self.stop = True
+                self.go_to_server_state = True
+                self.stop = True
 
                 return
 
@@ -460,9 +503,10 @@ class LineFollower(Node):
                 # Parse server assignment payload if present
                 if message.msg:
                     self.current_destination = message.msg
+                    self.server_msg_received = True
                     self.stop = False
 
-    def send_server_update(self, text_msg):
+    def send_server_update(self, text_msg, uid_increment = True):
         """Sends status messages to the server with retry/acknowledgement mechanism."""
         server_msg = ServerCommunication()
         server_msg.src = 1       # Source component: Buggy-1
@@ -491,7 +535,7 @@ class LineFollower(Node):
 
         self.on_destination = False
         self.lidar_ph_override = False
-        self.current_uid += 1
+        if(uid_increment): self.current_uid += 1
         return issent
 
     def send_server_ack(self, uid):
