@@ -32,9 +32,10 @@ SPEED_MAX = 2.0  # Speed capped at 0.2 for precise control dynamically
 TURN_MIN = -1.0
 TURN_MAX = 1.0
 
-SCALE = 6.0
+HIGH_SCALE = 6.0
+LOW_SCALE = 5.0
 
-SIGN_TIMEOUT = 12.0/SCALE
+SIGN_TIMEOUT = 12.0
 
 class SignState(IntEnum):
     FINDING = auto()
@@ -120,6 +121,7 @@ class LineFollower(Node):
         self.buggy_state = State.LINE_FOLLOWING
         self.sign_state = SignState.FINDING
         self.turn_start_time = self.get_clock().now().nanoseconds / 1e9
+        self.SCALE = HIGH_SCALE
 
         self.current_location_qr = False
         self.lidar_ph_override = False
@@ -171,13 +173,13 @@ class LineFollower(Node):
         turn = 0.0
         current_time = self.get_clock().now().nanoseconds / 1e9
 
-        self.get_logger().info(f"{current_time-self.last_sign_time} , {self.buggy_state}, {self.sign_state}")
+        self.get_logger().info(f"{self.SCALE} , {self.buggy_state}, {self.sign_state}")
 
         vectors = message
         image_width = vectors.image_width
         half_width = image_width/2
 
-        if current_time - self.last_sign_time > SIGN_TIMEOUT and self.sign_state == SignState.FOUND:
+        if current_time - self.last_sign_time > SIGN_TIMEOUT/self.SCALE and self.sign_state == SignState.FOUND:
             self.sign_state = SignState.CROSSED
 
 
@@ -206,17 +208,17 @@ class LineFollower(Node):
                     self.turn_start_time = current_time
 
             case State.TURNING_LEFT:
-                if(current_time - self.turn_start_time > 9.0/SCALE):
+                if(current_time - self.turn_start_time > 9.0/self.SCALE):
                     self.buggy_state = State.LINE_FOLLOWING
                     self.sign_state = SignState.FINDING
 
             case State.TURNING_RIGHT:
-                if(current_time - self.turn_start_time > 9.0/SCALE):
+                if(current_time - self.turn_start_time > 9.0/self.SCALE):
                     self.buggy_state = State.LINE_FOLLOWING
                     self.sign_state = SignState.FINDING
 
             case State.TURNING_STRAIGHT:
-                if(current_time - self.turn_start_time > 2.0/SCALE):
+                if(current_time - self.turn_start_time > 2.0/self.SCALE):
                     self.buggy_state = State.LINE_FOLLOWING
                     self.sign_state = SignState.FINDING
 
@@ -250,7 +252,10 @@ class LineFollower(Node):
                     deviation = half_width - middle_x
                     turn = deviation / half_width
 
-                speed = 0.2 * SCALE
+                speed = 0.2 * self.SCALE
+
+                if(self.sign_state == SignState.FINDING or self.lidar_ph_override or self.current_location_qr): self.SCALE = HIGH_SCALE
+                else: self.SCALE = LOW_SCALE
 
             case State.TURNING_LEFT:
                 if vectors.vector_count == 0:
@@ -278,7 +283,7 @@ class LineFollower(Node):
                     
                     turn = (line_slope + (half_width - target_x)) / half_width
 
-                speed = 0.15 * SCALE
+                speed = 0.15 * self.SCALE
 
             case State.TURNING_RIGHT:
                 if vectors.vector_count == 0:
@@ -306,11 +311,11 @@ class LineFollower(Node):
                     
                     turn = (line_slope + (half_width - target_x)) / half_width
 
-                speed = 0.15 * SCALE
+                speed = 0.15 * self.SCALE
 
             case State.TURNING_STRAIGHT:
                 turn = 0.0
-                speed = 0.2 * SCALE
+                speed = 0.2 * self.SCALE
 
             case State.STOPPED:
                 turn = 0.0
@@ -329,7 +334,7 @@ class LineFollower(Node):
                         #We see the right line maintain safe offset distance.
                         target_x = vector_center_x - safe_margin
                         turn = (line_slope + (half_width - target_x)) / half_width
-                    speed = 0.15 * SCALE
+                    speed = 0.15 * self.SCALE
 
                 elif vectors.vector_count == 2:
                     middle_x_left = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
@@ -341,11 +346,11 @@ class LineFollower(Node):
                     line_slope = vectors.vector_2[1].x - vectors.vector_2[0].x
                     
                     turn = (line_slope + (half_width - target_x)) / half_width
-                    speed = 0.15 * SCALE
+                    speed = 0.15 * self.SCALE
 
                 else:
                     turn = -0.6
-                    speed = 0.15 * SCALE
+                    speed = 0.15 * self.SCALE
 
             case State.OBSTACLE_AVOIDING_LEFT:
                 if vectors.vector_count == 1:
@@ -360,7 +365,7 @@ class LineFollower(Node):
                         # We see the left line maintain safe distance.
                         target_x = vector_center_x + safe_margin
                         turn = (line_slope + (half_width - target_x)) / half_width
-                    speed = 0.15 * SCALE
+                    speed = 0.15 * self.SCALE
 
                 elif vectors.vector_count == 2:
                     middle_x_left = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
@@ -372,10 +377,10 @@ class LineFollower(Node):
                     line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
                         
                     turn = (line_slope + (half_width - target_x)) / half_width
-                    speed = 0.15 * SCALE
+                    speed = 0.15 * self.SCALE
                 else:
                     turn = 0.6
-                    speed = 0.15 * SCALE
+                    speed = 0.15 * self.SCALE
 
 
         self.rover_move_manual_mode(speed, turn)
