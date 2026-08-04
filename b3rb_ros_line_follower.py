@@ -29,10 +29,10 @@ PI = math.pi
 # Control bounds
 SPEED_MIN = 0.0
 SPEED_MAX = 2.0  # Speed capped at 0.2 for precise control dynamically
-TURN_MIN = -1.0
-TURN_MAX = 1.0
+TURN_MIN = -1.1
+TURN_MAX = 1.1
 
-HIGH_SCALE = 6.0
+HIGH_SCALE = 6.0 #6 and 4
 LOW_SCALE = 4.0
 
 SIGN_TIMEOUT = 12.0
@@ -309,15 +309,15 @@ class LineFollower(Node):
                         turn=0.0
                     elif(time_diff >= t and time_diff < t+9.0): #9 second
                         speed = 0.1
-                        turn = 1.2 if self.parking_direction=="Left" else -1.2
+                        turn = 1.1 if self.parking_direction=="Left" else -1.1
                         self.check_parking_direction = False
-                    elif(time_diff >= t+9.0 and time_diff <= t+9.5): #0.5
+                    elif(time_diff >= t+9.0 and time_diff <= t+12.5): #0.5
                         speed = 0.1
                         turn = 0.0
-                    elif(time_diff >= t+9.5 and time_diff <= t+10.5): #1 
+                    elif(time_diff >= t+12.5 and time_diff <= t+13.5): #1 
                         speed = 0.0
                         turn = 0.0
-                    elif(not self.parked_msg_sent and time_diff >= t+10.5): 
+                    elif(not self.parked_msg_sent and time_diff >= t+13.5): 
                         self.send_server_update("PARKED")
                         self.parked_msg_sent = True
                     else:
@@ -478,9 +478,7 @@ class LineFollower(Node):
         num_readings = len(message.ranges)
 
         if self.lidar_ph_override and self.msg_sent == self.current_destination:
-            # ----------------------------------------------------
-            # STEP 1: Building Proximity Detection (Patient/Hospital)
-            # ----------------------------------------------------
+            
             right_side = list(message.ranges[80:92])
             num_sides_detected_right = 0
             left_side = list(message.ranges[268:280])
