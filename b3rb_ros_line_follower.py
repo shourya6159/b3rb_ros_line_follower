@@ -523,7 +523,7 @@ class LineFollower(Node):
 
         while True:
             self.rover_move_manual_mode(0.0, 0.0)
-            if tries >= 10:
+            if tries >= 2:
                 break
             if self.latest_ack == self.latest_uid:
                 issent = True
