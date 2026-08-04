@@ -303,21 +303,21 @@ class LineFollower(Node):
 
                 if self.mission_completed:
                     time_diff = current_time - self.mission_completed_time
-
-                    if(time_diff < 5.2):
-                        speed=0.3
+                    t=7.0
+                    if(time_diff < t):
+                        speed=0.4
                         turn=0.0
-                    elif(time_diff >= 5.2 and time_diff < 14.2):
+                    elif(time_diff >= t and time_diff < t+9.0): #9 second
                         speed = 0.1
-                        turn = 1.0 if self.parking_direction=="Left" else -1.0
+                        turn = 1.2 if self.parking_direction=="Left" else -1.2
                         self.check_parking_direction = False
-                    elif(time_diff >= 14.2 and time_diff <= 14.7):
+                    elif(time_diff >= t+9.0 and time_diff <= t+9.5): #0.5
                         speed = 0.1
                         turn = 0.0
-                    elif(time_diff >= 14.7 and time_diff <= 15.7):
+                    elif(time_diff >= t+9.5 and time_diff <= t+10.5): #1 
                         speed = 0.0
                         turn = 0.0
-                    elif(not self.parked_msg_sent and time_diff >= 15.7):
+                    elif(not self.parked_msg_sent and time_diff >= t+10.5): 
                         self.send_server_update("PARKED")
                         self.parked_msg_sent = True
                     else:
