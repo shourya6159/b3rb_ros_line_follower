@@ -14,7 +14,7 @@ BLUE_COLOR = (255, 0, 0)
 GREEN_COLOR = (0, 255, 0)
 
 VECTOR_IMAGE_HEIGHT_PERCENTAGE = 0.25 #can tune it later, this is the percentage of the image from the bottom that is analyzed for edge vectors. Lower portions are closer to the buggy, while upper portions see further ahead.
-VECTOR_MAGNITUDE_MINIMUM = 2  #subject to change
+VECTOR_MAGNITUDE_MINIMUM = 20  #subject to change
 
 class EdgeVectorsPublisher(Node):
 
@@ -105,7 +105,7 @@ class EdgeVectorsPublisher(Node):
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) #can think of other conversion based the feedback while submission
 
-        threshold_black = 20 #subject to change, this is the threshold for black color in grayscale. Anything below this value is considered black.
+        threshold_black = 10 #subject to change, this is the threshold for black color in grayscale. Anything below this value is considered black.
         thresh = cv2.threshold(gray, threshold_black, 255, cv2.THRESH_BINARY_INV)[1]
 
         thresh_cropped = thresh[self.image_height - self.lower_image_height:]
