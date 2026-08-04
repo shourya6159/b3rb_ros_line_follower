@@ -5,6 +5,7 @@ import numpy as np
 import cv2
 import math
 from synapse_msgs.msg import EdgeVectors
+from std_msgs.msg import String
 
 QOS_PROFILE_DEFAULT = 10
 PI = math.pi
@@ -13,8 +14,8 @@ RED_COLOR = (0, 0, 255)
 BLUE_COLOR = (255, 0, 0)
 GREEN_COLOR = (0, 255, 0)
 
-VECTOR_IMAGE_HEIGHT_PERCENTAGE = 0.25 #can tune it later, this is the percentage of the image from the bottom that is analyzed for edge vectors. Lower portions are closer to the buggy, while upper portions see further ahead.
-VECTOR_MAGNITUDE_MINIMUM = 20  #subject to change
+# VECTOR_IMAGE_HEIGHT_PERCENTAGE = 0.25 #can tune it later, this is the percentage of the image from the bottom that is analyzed for edge vectors. Lower portions are closer to the buggy, while upper portions see further ahead.
+# VECTOR_MAGNITUDE_MINIMUM = 20  #subject to change
 
 class EdgeVectorsPublisher(Node):
 
@@ -46,6 +47,10 @@ class EdgeVectorsPublisher(Node):
         self.image_width = 0
         self.lower_image_height = 0
         self.upper_image_height = 0
+
+        self.VECTOR_MAGNITUDE_MINIMUM=20
+        self.threshold_black=5
+        self.VECTOR_IMAGE_HEIGHT_PERCENTAGE = 0.25
 
     def publish_debug_image(self, publisher, image):
         message = CompressedImage()
@@ -80,7 +85,7 @@ class EdgeVectorsPublisher(Node):
             max_y_coord = max_y_coords[0]
 
             magnitude = np.linalg.norm(min_y_coord - max_y_coord)
-            if (magnitude > VECTOR_MAGNITUDE_MINIMUM):
+            if (magnitude > self.VECTOR_MAGNITUDE_MINIMUM):
                 rover_point = [self.image_width / 2, self.lower_image_height]
                 middle_point = (min_y_coord + max_y_coord) / 2
                 distance = np.linalg.norm(middle_point - rover_point)
@@ -100,13 +105,13 @@ class EdgeVectorsPublisher(Node):
     def process_image_for_edge_vectors(self, image):
 
         self.image_height, self.image_width, _ = image.shape
-        self.lower_image_height = int(self.image_height * VECTOR_IMAGE_HEIGHT_PERCENTAGE)
+        self.lower_image_height = int(self.image_height * self.VECTOR_IMAGE_HEIGHT_PERCENTAGE)
         self.upper_image_height = int(self.image_height - self.lower_image_height)
 
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) #can think of other conversion based the feedback while submission
 
-        threshold_black = 10 #subject to change, this is the threshold for black color in grayscale. Anything below this value is considered black.
-        thresh = cv2.threshold(gray, threshold_black, 255, cv2.THRESH_BINARY_INV)[1]
+        #threshold_black = 5 #subject to change, this is the threshold for black color in grayscale. Anything below this value is considered black.
+        thresh = cv2.threshold(gray, self.threshold_black, 255, cv2.THRESH_BINARY_INV)[1]
 
         thresh_cropped = thresh[self.image_height - self.lower_image_height:]
         image_cropped = image[self.image_height - self.lower_image_height:].copy()
@@ -162,6 +167,7 @@ class EdgeVectorsPublisher(Node):
             vectors_message.vector_count += 1
 
         self.publisher_edge_vectors.publish(vectors_message)
+
 
 def main(args=None):
     rclpy.init(args=args)

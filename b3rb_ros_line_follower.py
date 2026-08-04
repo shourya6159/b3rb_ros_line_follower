@@ -54,6 +54,9 @@ class State(IntEnum):
     SEND_SERVER_MSG = auto()
     WAITING_FOR_SERVER_MSG = auto()
 
+
+    PARKING= auto()
+
 class LineFollower(Node):
     """
     Core controller Node for the B3RB buggy integrated with NXP AIM Challenge logic.
@@ -130,6 +133,9 @@ class LineFollower(Node):
         self.tries = 0
         self.go_to_server_state = False
         self.server_msg_received = False
+        self.parking_direction = "Left"
+        self.check_parking_direction = False
+        self.parked_msg_sent = False
 
         self.current_location_qr = False
         self.lidar_ph_override = False
@@ -143,7 +149,9 @@ class LineFollower(Node):
         self.last_msg_sent = ""
         self.stop = False
         self.last=0.0
+
         self.mission_completed = False
+
         self.turn_direction = "Straight"
 
         self.last_sign_time = 0.0
@@ -155,7 +163,7 @@ class LineFollower(Node):
         self.latest_ack = -1
         self.current_uid = 10
         self.on_destination = False
-
+        self.mission_completed_time=0
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
 
@@ -181,7 +189,7 @@ class LineFollower(Node):
         turn = 0.0
         current_time = self.get_clock().now().nanoseconds / 1e9
 
-        self.get_logger().info(f"{self.SCALE} , {self.buggy_state}, {self.sign_state}")
+        if(not self.mission_completed): self.get_logger().info(f"{self.SCALE} , {self.buggy_state}, {self.sign_state}")
 
         vectors = message
         image_width = vectors.image_width
@@ -203,7 +211,7 @@ class LineFollower(Node):
                 elif(self.stop):
                     self.buggy_state = State.STOPPED
 
-                elif(self.obstacle_in_front):
+                elif(self.obstacle_in_front and not self.mission_completed):
                     if(self.avoidance_direction == "RIGHT"):
                         self.buggy_state = State.OBSTACLE_AVOIDING_RIGHT
                     else:
@@ -256,10 +264,21 @@ class LineFollower(Node):
 
             case State.WAITING_FOR_SERVER_MSG:
                 if(self.server_msg_received):
-                    self.stop = False
-                    self.buggy_state = State.LINE_FOLLOWING
+                    if self.current_destination=="OK":
+                        self.stop = False
+                        self.buggy_state = State.PARKING
+                    else:
+                        self.stop = False
+                        self.buggy_state = State.LINE_FOLLOWING
+
                     self.lidar_ph_override = False
                     self.go_to_server_state = False
+
+            case State.PARKING:
+                self.mission_completed=True
+                self.buggy_state=State.LINE_FOLLOWING
+                self.check_parking_direction = True
+                self.mission_completed_time=self.get_clock().now().nanoseconds / 1e9
 
 
 
@@ -281,6 +300,21 @@ class LineFollower(Node):
                     turn = deviation / half_width
 
                 speed = 0.2 * self.SCALE
+
+                if self.mission_completed:
+                    speed=0.3
+                    turn=0.0
+                    if(current_time - self.mission_completed_time >= 5.2 and current_time - self.mission_completed_time < 13.9):
+                        speed = 0.1
+                        turn = 1.0 if self.parking_direction=="Left" else -1.0
+                        self.check_parking_direction = False
+                    elif(current_time - self.mission_completed_time >= 13.9):
+                        speed = 0.0
+                        turn = 0.0
+                        if(not self.parked_msg_sent and current_time - self.mission_completed_time >= 14.9):
+                            self.send_server_update("PARKED")
+                            self.parked_msg_sent = True
+                    
 
                 if(self.sign_state == SignState.FINDING and not self.current_location_qr and abs(turn)<0.4): self.SCALE = HIGH_SCALE
                 else: self.SCALE = LOW_SCALE
@@ -420,7 +454,6 @@ class LineFollower(Node):
                     if self.tries < 5:
                         self.acknowledged = self.send_server_update(self.msg_sent, uid_increment = False)
                         self.last_msg_sent = self.msg_sent
-
                         self.tries += 1
 
             case State.WAITING_FOR_SERVER_MSG:
@@ -438,8 +471,6 @@ class LineFollower(Node):
             # ----------------------------------------------------
             # STEP 1: Building Proximity Detection (Patient/Hospital)
             # ----------------------------------------------------
-            print("XXXXXXXXXXXXXXXSTEP-2")
-            self.get_logger().info("HEHHHHHHHHEEEEEEEEEE0000000000000000000")
             right_side = list(message.ranges[80:92])
             num_sides_detected_right = 0
             left_side = list(message.ranges[268:280])
@@ -454,7 +485,6 @@ class LineFollower(Node):
                     num_sides_detected_left += 1
 
             if num_sides_detected_right >= 9 or num_sides_detected_left >= 9:
-                print("XXXXXXXXXXXXXXXSTEP-3")
                 self.on_destination = True
 
                 self.go_to_server_state = True
@@ -488,6 +518,19 @@ class LineFollower(Node):
             else:
                 self.obstacle_in_front = False
                 self.avoidance_direction = None
+
+        if self.mission_completed and self.check_parking_direction:
+            front_right_sector = list(message.ranges[mid - 20 : mid])
+            front_left_sector = list(message.ranges[mid : mid + 20])
+
+            for r in front_right_sector:
+                if(r<1.2 and r>0.1): cr+=1
+
+            for r in front_left_sector:
+                if(r<1.2 and r>0.1): cl+=1
+
+            self.parking_direction = "Left" if cl>=cr else "Right"
+
 
 
     def server_communication_callback(self, message):
@@ -523,7 +566,7 @@ class LineFollower(Node):
 
         while True:
             self.rover_move_manual_mode(0.0, 0.0)
-            if tries >= 2:
+            if tries >= 3:
                 break
             if self.latest_ack == self.latest_uid:
                 issent = True

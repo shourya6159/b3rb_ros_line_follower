@@ -19,6 +19,7 @@ from std_msgs.msg import String
 import cv2
 import numpy as np
 import os
+import json
 
 from ultralytics import YOLO
 from ament_index_python.packages import get_package_share_directory
@@ -82,7 +83,7 @@ class ObjectRecognizer(Node):
                 msg = String()
                 msg.data = sign_detected
                 self.publisher_sign.publish(msg)
-                self.get_logger().info(f"Detected Sign Board: {sign_detected}")
+                # self.get_logger().info(f"Detected Sign Board: {sign_detected}")
 
         cv2.imshow("Camera feed", image)
         cv2.waitKey(1)
@@ -91,7 +92,7 @@ class ObjectRecognizer(Node):
 
         if self.model is not None:
             try:
-                predictions = self.model.predict(image, conf=0.3, show=False)[0]
+                predictions = self.model.predict(image, conf=0.3, show=False, verbose=True)[0]
                 letters = []
                 directions = []
                 mappings = {}
@@ -115,7 +116,7 @@ class ObjectRecognizer(Node):
                             min_dis = abs(arrow[1]-location[1])
                             mappings[location[0]] = arrow[0]
 
-                return str(mappings)
+                return json.dumps(mappings)
 
             except Exception as e:
                 self.get_logger().debug(f"Inference failed: {e}")
@@ -133,11 +134,12 @@ class ObjectRecognizer(Node):
         if(contours):
             largest_contour = max(contours, key = cv2.contourArea)
             area = cv2.contourArea(largest_contour)
+            # self.get_logger().info(f"{area}")
 
             x, y, w, h = cv2.boundingRect(largest_contour)
 
             if(y < 5 or x+w+5 > image.shape[1] or x<5): return False
-            elif(area > 100 and area < 5000): return True
+            elif(area > 6000): return True
 
         return False
 
