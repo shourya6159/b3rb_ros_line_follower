@@ -33,7 +33,7 @@ TURN_MIN = -1.0
 TURN_MAX = 1.0
 
 HIGH_SCALE = 6.0
-LOW_SCALE = 5.0
+LOW_SCALE = 4.0
 
 SIGN_TIMEOUT = 12.0
 
@@ -156,7 +156,7 @@ class LineFollower(Node):
 
         self.last_sign_time = 0.0
 
-        self.latest_sign_board_info = {"A": "", "B": "", "C": "", "X": "", "Y": "", "Z": ""}
+        self.latest_sign_board_info = {"A": "", "B": "", "C": "", "X": "", "Y": "", "Z": "", "OK": ""}
         self.mappings = {"PATIENT_1" : "A", "PATIENT_2" : "B", "PATIENT_3" : "C", "HOSPITAL_1" : "X", "HOSPITAL_2" : "Y", "HOSPITAL_3" : "Z"}
 
         self.latest_uid = -1
