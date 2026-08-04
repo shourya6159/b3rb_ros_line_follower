@@ -189,7 +189,7 @@ class LineFollower(Node):
         turn = 0.0
         current_time = self.get_clock().now().nanoseconds / 1e9
 
-        if(not self.mission_completed): self.get_logger().info(f"{self.SCALE} , {self.buggy_state}, {self.sign_state}")
+        self.get_logger().info(f"{self.SCALE} , {self.buggy_state}, {self.sign_state}")
 
         vectors = message
         image_width = vectors.image_width
@@ -302,18 +302,28 @@ class LineFollower(Node):
                 speed = 0.2 * self.SCALE
 
                 if self.mission_completed:
-                    speed=0.3
-                    turn=0.0
-                    if(current_time - self.mission_completed_time >= 5.2 and current_time - self.mission_completed_time < 13.9):
+                    time_diff = current_time - self.mission_completed_time
+
+                    if(time_diff < 5.2):
+                        speed=0.3
+                        turn=0.0
+                    elif(time_diff >= 5.2 and time_diff < 14.2):
                         speed = 0.1
                         turn = 1.0 if self.parking_direction=="Left" else -1.0
                         self.check_parking_direction = False
-                    elif(current_time - self.mission_completed_time >= 13.9):
+                    elif(time_diff >= 14.2 and time_diff <= 14.7):
+                        speed = 0.1
+                        turn = 0.0
+                    elif(time_diff >= 14.7 and time_diff <= 15.7):
                         speed = 0.0
                         turn = 0.0
-                        if(not self.parked_msg_sent and current_time - self.mission_completed_time >= 14.9):
-                            self.send_server_update("PARKED")
-                            self.parked_msg_sent = True
+                    elif(not self.parked_msg_sent and time_diff >= 15.7):
+                        self.send_server_update("PARKED")
+                        self.parked_msg_sent = True
+                    else:
+                        speed=0.0
+                        turn=0.0
+
                     
 
                 if(self.sign_state == SignState.FINDING and not self.current_location_qr and abs(turn)<0.4): self.SCALE = HIGH_SCALE
