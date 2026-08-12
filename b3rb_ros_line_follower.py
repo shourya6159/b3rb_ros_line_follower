@@ -22,6 +22,11 @@ from sensor_msgs.msg import Joy, LaserScan
 from std_msgs.msg import String
 from synapse_msgs.msg import EdgeVectors, ServerCommunication
 from enum import IntEnum, auto
+import torch
+import torch.nn as nn
+import numpy as np
+import os
+from ament_index_python.packages import get_package_share_directory
 
 QOS_PROFILE_DEFAULT = 10
 PI = math.pi
@@ -32,10 +37,29 @@ SPEED_MAX = 2.0  # Speed capped at 0.2 for precise control dynamically
 TURN_MIN = -1.1
 TURN_MAX = 1.1
 
-HIGH_SCALE = 6.0 #6 and 4
+HIGH_SCALE = 8.0 #6 and 4
 LOW_SCALE = 4.0
 
 SIGN_TIMEOUT = 12.0
+
+class LidarParkingModel(nn.Module):
+    def __init__(self):
+        super(LidarParkingModel, self).__init__()
+        self.layer1 = nn.Linear(180, 256)
+        self.relu1 = nn.ReLU()
+        self.layer2 = nn.Linear(256, 128)
+        self.relu2 = nn.ReLU()
+        self.layer3 = nn.Linear(128, 64)
+        self.relu3 = nn.ReLU()
+        self.output_layer = nn.Linear(64, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.relu1(self.layer1(x))
+        x = self.relu2(self.layer2(x))
+        x = self.relu3(self.layer3(x))
+        x = self.sigmoid(self.output_layer(x))
+        return x
 
 class SignState(IntEnum):
     FINDING = auto()
@@ -136,6 +160,12 @@ class LineFollower(Node):
         self.parking_direction = "Left"
         self.check_parking_direction = False
         self.parked_msg_sent = False
+        self.turn_completed = False
+        self.start_check_side_poles = False
+        self.pole_check_right = 0
+        self.pole_check_left = 0
+        self.parking_direction = "Left"
+        self.start_parking = False
 
         self.current_location_qr = False
         self.lidar_ph_override = False
@@ -144,7 +174,7 @@ class LineFollower(Node):
         self.near_building = False
         self.patient_id = None
         self.hospital_id = None
-        self.current_destination = "A"  # Default destination is patient A
+        self.current_destination = "Y"  # Default destination is patient A
         self.msg_sent = ""
         self.last_msg_sent = ""
         self.stop = False
@@ -166,6 +196,23 @@ class LineFollower(Node):
         self.mission_completed_time=0
         # Timer to publish drive commands at 10Hz
         self.control_timer = self.create_timer(0.1, self.publish_drive_commands)
+
+        share_dir = get_package_share_directory('b3rb_ros_line_follower')
+        workspace_root = os.path.abspath(os.path.join(share_dir, '..', '..', '..', '..'))
+
+        self.raw_model_path = os.path.join(
+            workspace_root, 
+            'src',
+            'b3rb_ros_line_follower',
+            'b3rb_ros_line_follower',
+            'b3rb_ros_line_follower',
+            'lidar_parking_model.pth'
+        )
+
+        self.parking_nn = LidarParkingModel()
+        self.parking_nn.load_state_dict(torch.load(os.path.expanduser(self.raw_model_path), weights_only=True))
+        self.parking_nn.eval()
+        self.latest_lidar_data = None
 
         self.get_logger().info("Line Follower controller initialized.")
 
@@ -189,7 +236,7 @@ class LineFollower(Node):
         turn = 0.0
         current_time = self.get_clock().now().nanoseconds / 1e9
 
-        self.get_logger().info(f"{self.SCALE} , {self.buggy_state}, {self.sign_state}")
+        # self.get_logger().info(f"{self.SCALE} , {self.buggy_state}, {self.sign_state}")
 
         vectors = message
         image_width = vectors.image_width
@@ -203,6 +250,7 @@ class LineFollower(Node):
             case State.LINE_FOLLOWING:
                 if(self.go_to_server_state):
                     self.buggy_state = State.SEND_SERVER_MSG
+                    self.server_msg_received = False
                     self.last_msg_sent_time = current_time
                     self.go_to_server_state = False
                     self.acknowledged = False
@@ -223,22 +271,42 @@ class LineFollower(Node):
                         case "Straight":
                             self.buggy_state = State.TURNING_STRAIGHT
                         case "Left":
+                            self.turn_completed = False
+                            self.pole_check_left = self.pole_check_right = 0
                             self.buggy_state = State.TURNING_LEFT
                         case "Right":
+                            self.turn_completed = False
+                            self.pole_check_left = self.pole_check_right = 0
                             self.buggy_state = State.TURNING_RIGHT
                         case _:
                             pass
                     self.turn_start_time = current_time
 
             case State.TURNING_LEFT:
-                if(current_time - self.turn_start_time > 9.0/self.SCALE):
-                    self.buggy_state = State.LINE_FOLLOWING
-                    self.sign_state = SignState.FINDING
+                if(current_time - self.turn_start_time >= 6.5/self.SCALE):
+                    self.start_check_side_poles = True
+                    # self.buggy_state = State.LINE_FOLLOWING
+                    # self.sign_state = SignState.FINDING
+
+                if self.turn_completed:
+                        self.buggy_state = State.LINE_FOLLOWING
+                        self.sign_state = SignState.FINDING
+                        self.start_check_side_poles = False
+                        self.pole_check_left = self.pole_check_right = 0
+                        self.turn_completed = False
 
             case State.TURNING_RIGHT:
-                if(current_time - self.turn_start_time > 9.0/self.SCALE):
+                if(current_time - self.turn_start_time >= 6.5/self.SCALE):
+                    self.start_check_side_poles = True
+                    # self.buggy_state = State.LINE_FOLLOWING
+                    # self.sign_state = SignState.FINDING
+
+                if self.turn_completed:
                     self.buggy_state = State.LINE_FOLLOWING
                     self.sign_state = SignState.FINDING
+                    self.start_check_side_poles = False
+                    self.pole_check_left = self.pole_check_right = 0
+                    self.turn_completed = False
 
             case State.TURNING_STRAIGHT:
                 if(current_time - self.turn_start_time > 2.0/self.SCALE):
@@ -260,7 +328,6 @@ class LineFollower(Node):
                 if(self.acknowledged):
                     self.buggy_state = State.WAITING_FOR_SERVER_MSG
                     self.current_uid += 1
-                    self.server_msg_received = False
 
             case State.WAITING_FOR_SERVER_MSG:
                 if(self.server_msg_received):
@@ -302,41 +369,49 @@ class LineFollower(Node):
                 speed = 0.2 * self.SCALE
 
                 if self.mission_completed:
-                    time_diff = current_time - self.mission_completed_time
-                    t=7.0
-                    if(time_diff < t):
-                        speed=0.4
-                        turn=0.0
-                    elif(time_diff >= t and time_diff < t+9.0): #9 second
-                        speed = 0.1
-                        turn = 1.1 if self.parking_direction=="Left" else -1.1
-                        self.check_parking_direction = False
-                    elif(time_diff >= t+9.0 and time_diff <= t+12.5): #0.5
-                        speed = 0.1
-                        turn = 0.0
-                    elif(time_diff >= t+12.5 and time_diff <= t+13.5): #1 
-                        speed = 0.0
-                        turn = 0.0
-                    elif(not self.parked_msg_sent and time_diff >= t+13.5): 
-                        self.send_server_update("PARKED")
-                        self.parked_msg_sent = True
-                    else:
-                        speed=0.0
-                        turn=0.0
+                    turn = 0.0
+                    speed = 0.2
 
-                    
+                    if not self.start_parking:
+                        with torch.no_grad():
+                            prediction = self.parking_nn(self.latest_lidar_data)
+                            probability = prediction.item() 
+
+                            if probability > 0.5:
+                                self.start_parking = True
+                                print("Started")
+                                self.mission_completed_time = current_time
+                    else:
+                        time_diff = current_time - self.mission_completed_time
+                        t = 9.5
+                        if(time_diff < t):
+                            speed=0.1
+                            turn=1.0
+                        elif(time_diff >= t and time_diff < t+1.0): #2 second
+                            speed = 0.1
+                            turn = 0
+                        elif(time_diff >= t+1.0 and time_diff <= t+2.0): #1 
+                            speed = 0.0
+                            turn = 0.0
+                        elif(not self.parked_msg_sent and time_diff >= t+2.0): 
+                            self.send_server_update("PARKED")
+                            self.parked_msg_sent = True
+                        else:
+                            speed=0.0
+                            turn=0.0
+                                    
 
                 if(self.sign_state == SignState.FINDING and not self.current_location_qr and abs(turn)<0.4): self.SCALE = HIGH_SCALE
                 else: self.SCALE = LOW_SCALE
 
             case State.TURNING_LEFT:
                 if vectors.vector_count == 0:
-                    turn = 0.6
+                    turn = 0.4
 
                 elif vectors.vector_count == 1:
                     vector_center_x = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
                     line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
-                    safe_margin = half_width*0.45
+                    safe_margin = half_width*0.8
 
                     if vector_center_x > half_width:
                         # We see the right line .steer away from it
@@ -359,12 +434,12 @@ class LineFollower(Node):
 
             case State.TURNING_RIGHT:
                 if vectors.vector_count == 0:
-                    turn = -0.6
+                    turn = -0.4
 
                 elif vectors.vector_count == 1:
                     vector_center_x = (vectors.vector_1[0].x + vectors.vector_1[1].x) / 2.0
                     line_slope = vectors.vector_1[1].x - vectors.vector_1[0].x
-                    safe_margin = half_width*0.45
+                    safe_margin = half_width*0.8
 
                     if vector_center_x < half_width:
                         #We see the left line .steer away from it
@@ -477,6 +552,23 @@ class LineFollower(Node):
         """Receives LIDAR range measurements to check building proximity or obstacles."""
         num_readings = len(message.ranges)
 
+        lidar_slice = message.ranges[num_readings//2:] if self.parking_direction=="Left" else message.ranges[0:num_readings//2 - 1]
+        cleaned_slice = []
+
+        for r in lidar_slice:
+            if math.isinf(r) or math.isnan(r):
+                cleaned_slice.append(10.0)  # Replace inf/nan with a max distance value (e.g., 10 meters)
+            else:
+                cleaned_slice.append(round(r, 4)) # Round for cleaner CSV
+
+        while len(cleaned_slice) != 180:
+            cleaned_slice.append(10.0)
+
+        if self.parking_direction == "Right": cleaned_slice[::-1]
+
+        self.latest_lidar_data = torch.tensor(np.array(cleaned_slice), dtype=torch.float32)
+
+
         if self.lidar_ph_override and self.msg_sent == self.current_destination:
             
             right_side = list(message.ranges[80:92])
@@ -494,6 +586,7 @@ class LineFollower(Node):
 
             if num_sides_detected_right >= 9 or num_sides_detected_left >= 9:
                 self.on_destination = True
+                if not self.start_parking: self.parking_direction = "Left" if num_sides_detected_right >= 9 else "Right"
 
                 self.go_to_server_state = True
                 self.stop = True
@@ -539,6 +632,23 @@ class LineFollower(Node):
 
             self.parking_direction = "Left" if cl>=cr else "Right"
 
+        if self.start_check_side_poles:
+            right_side = float(message.ranges[90])
+            left_side = float(message.ranges[270])
+
+            if right_side < 2.0 and right_side > 0.1:
+                self.pole_check_right += 1
+
+            if left_side < 2.0 and left_side > 0.1:
+                self.pole_check_left += 1
+
+            if(self.pole_check_right >= 1 and self.pole_check_left >= 1):
+                self.turn_completed = True
+                self.start_check_side_poles = False
+
+            # self.get_logger().info(f"{self.pole_check_right}, {self.pole_check_left}")
+
+
 
 
     def server_communication_callback(self, message):
@@ -574,15 +684,15 @@ class LineFollower(Node):
 
         while True:
             self.rover_move_manual_mode(0.0, 0.0)
-            if tries >= 3:
+            if tries >= 1:
                 break
+            rclpy.spin_once(self, timeout_sec=0.1)
             if self.latest_ack == self.latest_uid:
                 issent = True
                 break
 
             self.publisher_server.publish(server_msg)
             tries += 1
-            rclpy.spin_once(self, timeout_sec=0.1)
 
         self.on_destination = False
         self.lidar_ph_override = False

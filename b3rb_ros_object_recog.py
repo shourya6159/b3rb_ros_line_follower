@@ -66,6 +66,10 @@ class ObjectRecognizer(Node):
 )
 
         self.model = YOLO(os.path.expanduser(self.raw_model_path))
+
+        empty_image = np.zeros((512, 512, 3), dtype=np.uint8)
+        for i in range(0,3): self.classify_sign(empty_image)
+
         if(self.model is None): self.get_logger().info("Model couldn't be loaded!!!")
 
         self.get_logger().info("Object Recognizer Node started. Waiting for images...")
@@ -76,7 +80,7 @@ class ObjectRecognizer(Node):
         np_arr = np.frombuffer(message.data, np.uint8)
         image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-        if not self.is_sign_visible(image):
+        if self.is_sign_visible(image):
             sign_detected = self.classify_sign(image)
 
             if sign_detected is not None:
@@ -139,7 +143,7 @@ class ObjectRecognizer(Node):
             x, y, w, h = cv2.boundingRect(largest_contour)
 
             if(y < 5 or x+w+5 > image.shape[1] or x<5): return False
-            elif(area > 6000): return True
+            elif(area > 10000): return True
 
         return False
 

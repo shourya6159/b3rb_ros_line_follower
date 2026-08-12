@@ -48,7 +48,7 @@ class EdgeVectorsPublisher(Node):
         self.lower_image_height = 0
         self.upper_image_height = 0
 
-        self.VECTOR_MAGNITUDE_MINIMUM=20
+        self.VECTOR_MAGNITUDE_MINIMUM=10
         self.threshold_black=5
         self.VECTOR_IMAGE_HEIGHT_PERCENTAGE = 0.25
 
@@ -153,17 +153,30 @@ class EdgeVectorsPublisher(Node):
         vectors_message.vector_count = 0
 
         if len(vectors) > 0:
-            vectors_message.vector_1[0].x = float(vectors[0][0][0])
-            vectors_message.vector_1[0].y = float(vectors[0][0][1])
-            vectors_message.vector_1[1].x = float(vectors[0][1][0])
-            vectors_message.vector_1[1].y = float(vectors[0][1][1])
+            if(float(vectors[0][1][1]) >= float(vectors[0][0][1])):
+                vectors_message.vector_1[0].x = float(vectors[0][0][0])
+                vectors_message.vector_1[0].y = float(vectors[0][0][1])
+                vectors_message.vector_1[1].x = float(vectors[0][1][0])
+                vectors_message.vector_1[1].y = float(vectors[0][1][1])
+            else:
+                vectors_message.vector_1[1].x = float(vectors[0][0][0])
+                vectors_message.vector_1[1].y = float(vectors[0][0][1])
+                vectors_message.vector_1[0].x = float(vectors[0][1][0])
+                vectors_message.vector_1[0].y = float(vectors[0][1][1])
+
             vectors_message.vector_count += 1
 
         if len(vectors) > 1:
-            vectors_message.vector_2[0].x = float(vectors[1][0][0])
-            vectors_message.vector_2[0].y = float(vectors[1][0][1])
-            vectors_message.vector_2[1].x = float(vectors[1][1][0])
-            vectors_message.vector_2[1].y = float(vectors[1][1][1])
+            if(float(vectors[1][1][1]) >= float(vectors[1][0][1])):
+                vectors_message.vector_2[0].x = float(vectors[1][0][0])
+                vectors_message.vector_2[0].y = float(vectors[1][0][1])
+                vectors_message.vector_2[1].x = float(vectors[1][1][0])
+                vectors_message.vector_2[1].y = float(vectors[1][1][1])
+            else:
+                vectors_message.vector_2[1].x = float(vectors[1][0][0])
+                vectors_message.vector_2[1].y = float(vectors[1][0][1])
+                vectors_message.vector_2[0].x = float(vectors[1][1][0])
+                vectors_message.vector_2[0].y = float(vectors[1][1][1])
             vectors_message.vector_count += 1
 
         self.publisher_edge_vectors.publish(vectors_message)
